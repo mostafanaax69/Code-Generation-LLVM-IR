@@ -1,0 +1,778 @@
+%{
+	#define YYSTYPE void*
+	#include <iostream>
+	#include <stdlib.h>
+	#include "Classes.h"
+	#include "output.h"
+	using namespace output;
+	int yylex();
+	extern int yylineno;
+	void yyerror(const char*);
+	void bpatch(){
+		std:: cout << "break Point" << std::endl;
+	}
+	class Variable{
+	public:
+	Variable(string t,string n){
+	name = n;
+	type = t;
+	}
+	string name;
+	string type;
+	};
+	
+	class Args{
+	public:
+	vector<string> types;
+	vector<string> names;
+	};
+	
+	class Exp{
+		public:
+		Exp(string n, string t, int i = 0) : name(n), type(t), reg(freshVar(i)) {}
+		virtual ~Exp() = default;
+		string name;
+		string reg;
+		string type;
+		void changeReg(string r) { reg =r; }
+	};
+	
+	class BExp : public Exp {
+	public:
+	BExp(string n, string t): Exp(n,t) {}
+	vector<pair<int,BranchLabelIndex>> trueList;
+	vector<pair<int,BranchLabelIndex>> falseList;
+	virtual ~BExp() = default;
+	};
+	
+	class Statement{
+	public:
+		~Statement() {}
+		vector<pair<int,BranchLabelIndex>> nextList;
+		vector<pair<int,BranchLabelIndex>> contList;
+		vector<pair<int,BranchLabelIndex>> breakList;
+	};
+	
+%}
+
+%token ID
+%token LBRACE
+%token RBRACE
+%token VOID
+%token COMMA
+%token SC
+%token IF
+%token WHILE
+%token BREAK
+%token CONTINUE
+%token RETURN
+%token INT
+%token BYTE
+%token BOOL
+%token NUM
+%token B
+%token STRING
+%token TRUE
+%token FALSE
+
+
+
+%right ASSIGN
+%left OR
+%left AND
+%left RELOPII
+%nonassoc RELOP
+%left PLUS MINUS
+%left MULT DIV
+%right NOT
+%left LPAREN
+%nonassoc RPAREN
+%nonassoc ELSE
+
+%%
+
+Program:	{ init(); } Funcs{ closeFuncScope(); destroy();};
+
+Funcs:	{ }
+		| FuncDecl Funcs{ };
+
+FuncDecl:	RetType ID LPAREN Formals RPAREN LBRACE {
+					openScope();
+					insertFunc(*(string*)$2,*((string*)$1), ((Args*)$4)->types, ((Args*)$4)->names);
+					 delete (string*)$2; delete (Args*)$4;
+					} Statements M RBRACE CS {  if((*(string*)$1)=="VOID") CodeBuffer::instance().emit("ret void");
+												else CodeBuffer::instance().emit("ret "+ c2llvm_type((*(string*)$1)) +" 0");
+												delete (string*)$1;
+												CodeBuffer::instance().emit(" } ");
+												Statement* s = (Statement*)$8;
+												CodeBuffer::instance().bpatch(s->nextList,*(string*)$9);
+												delete s;
+												delete (string*)$9;};
+
+RetType:	Type{ $$ = $1;}
+			| VOID{ string* t = new string("VOID"); $$ = t;};
+
+Formals:	{ Args* a = new Args(); $$ = a; }
+			| FormalsList{ $$ = $1; };
+
+FormalsList:	FormalDecl{Args* a = new Args(); a->types.push_back(((Variable*)$1)->type); a->names.push_back(((Variable*)$1)->name); $$=a; delete (Variable*)$1; }
+				| FormalDecl COMMA FormalsList{ Args* a =(Args*)$3; a->types.insert(a->types.begin(),((Variable*)$1)->type); a->names.insert(a->names.begin(),((Variable*)$1)->name);  $$ = a; delete (Variable*)$1; };
+
+FormalDecl:		Type ID{ Variable* v = new Variable(*(string*)$1, *(string*)$2); delete (string*)$2; delete (string*)$1; $$ = v;};
+
+Statements:		Statement M{ 			Statement* s1 = (Statement*)$1;
+										string* l = (string*)$2;
+										CodeBuffer::instance().bpatch(s1->nextList,*l);
+										Statement* s = new Statement();
+										s->contList = s1->contList;
+										s->breakList = s1->breakList;
+										$$=s;
+										delete (Statement*)$1; delete l;}
+				| Statements M Statement{ 
+										Statement* s1 = (Statement*)$1;
+										Statement* s2 = (Statement*)$3;
+										string* l = (string*)$2;
+										CodeBuffer::instance().bpatch(s1->nextList,*l);
+										$$ = s2;
+										s2->contList = CodeBuffer::merge(s2->contList, s1->contList);
+										s2->breakList = CodeBuffer::merge(s2->breakList, s1->breakList);
+										delete (Statement*)$1; delete l;
+										};
+	
+IL : { inLoop(); }
+OL : { outLoop(); }	
+OS : { openScope();}
+CS : { closeVarScope();} 
+ 	
+
+Statement:		LBRACE OS Statements RBRACE CS { $$ = $3; }
+				| Type ID SC{ insertVar(*(string*)$2,*(string*)$1);
+								storeVar(*(string*)$2,"0",*(string*)$1);
+								delete (string*)$2; delete (string*)$1; $$ = new Statement();
+								
+				}
+				| Type ID ASSIGN Exp SC{
+				if((*(string*)$1)!=(((Exp*)$4)->type) && ((*(string*)$1)!="INT" || (((Exp*)$4)->type)!="BYTE"))
+				{ delete (Exp*)$4;
+				delete (string*)$1; delete (string*)$2;
+				TypeError(); } 
+				insertVar(*(string*)$2,*(string*)$1);
+				string t = *(string*)$1;
+				string id = *(string*)$2;
+				if(t == "BOOL"){
+					string reg1 = freshVar(), reg2 = freshVar();
+					BExp* b = (BExp*)$4;
+					string reg = freshVar();
+					string l1 = CodeBuffer::instance().genLabel();
+					CodeBuffer::instance().emit(reg1+ " = add i1 0, 1");
+					int loc = CodeBuffer::instance().emit("br label @");
+					string l2 = CodeBuffer::instance().genLabel();
+					CodeBuffer::instance().emit(reg2+ " = add i1 0, 0");
+					string l3 = CodeBuffer::instance().genLabel();
+					pair<int,BranchLabelIndex> p(loc,FIRST);
+					CodeBuffer::instance().bpatch(CodeBuffer::makelist(p),l3);
+					CodeBuffer::instance().bpatch(b->trueList,l1);
+					CodeBuffer::instance().bpatch(b->falseList,l2);
+					CodeBuffer::instance().emit(reg+" = phi i1 [ "+reg1+", %"+l1+" ], [ "+ reg2+", %"+l2+" ]");
+					storeVar(id,reg,((Exp*)$4)->type);
+				} else{
+					Exp* e = (Exp*)$4;
+					storeVar(id,e->reg,((Exp*)$4)->type);
+				}
+				delete (Exp*)$4; delete (string*)$1; delete (string*)$2; $$ = new Statement();  }
+				| ID ASSIGN Exp SC{ string t = idType(*(string*)$1); if(t.compare(((Exp*)$3)->type) && (t.compare("INT") || (((Exp*)$3)->type).compare("BYTE"))){ delete (Exp*)$3; delete (string*)$1; TypeError(); }
+				string id = *(string*)$1;
+				string reg1 = freshVar(), reg2 = freshVar();
+				int offset = getVarOffset(id)*4;
+				if(t == "BOOL"){
+					BExp* b = (BExp*)$3;
+					string reg = freshVar();
+					string l1 = CodeBuffer::instance().genLabel();
+					CodeBuffer::instance().emit(reg1+ " = add i1 0, 1");
+					int loc = CodeBuffer::instance().emit("br label @");
+					string l2 = CodeBuffer::instance().genLabel();
+					CodeBuffer::instance().emit(reg2+ " = add i1 0, 0");
+					string l3 = CodeBuffer::instance().genLabel();
+					pair<int,BranchLabelIndex> p(loc,FIRST);
+					CodeBuffer::instance().bpatch(CodeBuffer::makelist(p),l3);
+					CodeBuffer::instance().bpatch(b->trueList,l1);
+					CodeBuffer::instance().bpatch(b->falseList,l2);
+					CodeBuffer::instance().emit(reg+" = phi i1 [ "+reg1+", %"+l1+" ], [ "+ reg2+", %"+l2+" ]");
+					storeVar(id, reg,((Exp*)$3)->type);
+				} else{
+					Exp* e = (Exp*)$3;
+					storeVar(id,e->reg,((Exp*)$3)->type);
+				}
+   				delete (Exp*)$3; delete (string*)$1; $$ =new Statement(); }
+				| Call SC{ $$ = new Statement(); delete (Exp*)$1;}
+				| RETURN SC{ checkReturnType("VOID"); CodeBuffer::instance().emit("ret void"); $$ = new Statement();}
+				| RETURN Exp SC
+								{ 
+									Exp* e = ((Exp*)$2);
+									string t = checkReturnType(e->type);
+									if(e->type != "BOOL") {
+										if(t=="INT" && e->type =="BYTE")
+										{
+											string reg = freshVar();
+											CodeBuffer::instance().emit(reg+" = zext i8 "+ e->reg+" to i32");
+											CodeBuffer::instance().emit("ret i32 "+reg);
+										}
+										else CodeBuffer::instance().emit("ret "+ c2llvm_type(e->type) +" "+e->reg);
+										delete (Exp*)$2;
+									}
+									else {
+										string tl = CodeBuffer::instance().genLabel();
+										CodeBuffer::instance().emit("ret i1 1");
+										string fl = CodeBuffer::instance().genLabel();
+										CodeBuffer::instance().emit("ret i1 0");
+										BExp* b = (BExp*)e;
+										CodeBuffer::instance().bpatch(b->trueList,tl);
+										CodeBuffer::instance().bpatch(b->falseList,fl);
+										delete (BExp*)$2; 
+									}
+									$$ = new Statement();
+								}
+				| IF LPAREN BExp RPAREN OS M Statement CS 
+				{
+					BExp* b = (BExp*)$3;
+					Statement* s1 = (Statement*)$7;
+					string* l = (string*)$6;
+					CodeBuffer::instance().bpatch(b->trueList,*l);
+					Statement* s = new Statement();
+					s->nextList = CodeBuffer::merge(b->falseList,s1->nextList);
+					s->contList = s1->contList;
+					s->breakList = s1->breakList;
+					$$ = s;
+					delete (BExp*)$3; delete l; delete s1;
+				}
+				| IF LPAREN BExp RPAREN OS M Statement CS ELSE N OS M Statement CS
+				{
+					Statement* s1 = (Statement*)$7, *s2 = (Statement*)$13;
+					BExp* b = (BExp*)$3;
+					string* l1 = (string*)$6;
+					string* l2 = (string*)$12;
+					CodeBuffer::instance().bpatch(b->trueList,*l1);
+					CodeBuffer::instance().bpatch(b->falseList,*l2);
+					Statement* s = new Statement();
+					s->nextList = CodeBuffer::merge(s1->nextList,s2->nextList);
+					pair<int,BranchLabelIndex> p(*(int*)$10,FIRST);
+					s->nextList = CodeBuffer::merge(s->nextList,CodeBuffer::makelist(p));
+					s->contList = CodeBuffer::merge(s2->contList, s1->contList);
+					s->breakList = CodeBuffer::merge(s2->breakList, s1->breakList);
+					$$ = s;
+					delete b;
+					delete l1; delete l2;
+					delete s1; delete s2;
+					delete (int*)$10;
+				}
+				| WHILE LPAREN M BExp RPAREN OS IL M Statement OL CS
+				{
+					Statement* s1 = (Statement*)$9;
+					BExp* b = (BExp*)$4;
+					string* l1 = (string*)$3;
+					string* l2 = (string*)$8;
+					CodeBuffer::instance().bpatch(b->trueList,*l2);
+					CodeBuffer::instance().bpatch(s1->nextList,*l1);
+					CodeBuffer::instance().bpatch(s1->contList,*l1);
+					Statement* s = new Statement();
+					s->nextList = CodeBuffer::merge(b->falseList,s1->breakList);
+					$$ = s;
+					CodeBuffer::instance().emit("br label %"+*l1);
+					delete (string*)$8; delete (string*)$3; delete b; delete s1;
+				}
+				| WHILE LPAREN M BExp  RPAREN OS IL M Statement OL CS ELSE N OS M Statement CS
+				{
+					Statement* s1 = (Statement*)$9, *s2 = (Statement*)$16;
+					BExp* b = (BExp*)$4;
+					string* l1 = (string*)$8;
+					string* l2 = (string*)$15;
+					string* l3 = (string*)$3;
+					CodeBuffer::instance().bpatch(b->trueList,*l1);
+					CodeBuffer::instance().bpatch(b->falseList,*l2);
+					CodeBuffer::instance().bpatch(s1->nextList,*l3);
+					CodeBuffer::instance().bpatch(s1->contList,*l3);
+					pair<int,BranchLabelIndex> p(*(int*)$13,FIRST);
+					CodeBuffer::instance().bpatch(CodeBuffer::makelist(p),*l3);
+					Statement* s = new Statement();
+					s->nextList = CodeBuffer::merge(s2->nextList,s1->breakList);
+					s->contList = s2->contList;
+					s->breakList = s2->breakList;
+					$$ = s;
+					delete l1;
+					delete l2;
+					delete l3;
+					delete b;
+					delete s1;
+					delete (int*)$13;
+					delete s2;
+				}
+				| BREAK SC
+				{ 	checkLoop(0);
+					int loc = CodeBuffer::instance().emit("br label @");
+					Statement* s = new Statement();
+					pair<int,BranchLabelIndex> p(loc,FIRST);
+					s->breakList=CodeBuffer::makelist(p);
+					$$=s;
+				}
+				| CONTINUE SC
+				{ 
+					checkLoop(1);
+					int loc = CodeBuffer::instance().emit("br label @");
+					Statement* s = new Statement();
+					pair<int,BranchLabelIndex> p(loc,FIRST);
+					s->contList=CodeBuffer::makelist(p);
+					$$=s;
+				};
+				
+Call:	ID LPAREN ExpList RPAREN{ vector<pair<string,string>>* v = (vector<pair<string,string>>*)$3;
+								string reg = freshVar();
+								string s = checkCall(*v,*(string*)$1,reg);
+								Exp* e;
+								if(s!="BOOL") e = new Exp("",s);
+								else e = new BExp("",s); 
+								e->changeReg(reg);
+								$$ = e;
+								delete (string*)$1;  delete (vector<pair<string,string>>*)$3;}
+		| ID LPAREN RPAREN{ 
+							string reg = freshVar();
+							string s = checkCall(vector<pair<string,string>>(),*(string*)$1, reg);
+							Exp* e;
+							if(s!="BOOL") e = new Exp("",s);
+							else e = new BExp("",s);
+							e->changeReg(reg);
+							$$ = e;
+						    delete (string*)$1;};
+
+ExpList:	Exp{ vector<pair<string,string>>* v = new vector<pair<string,string>>();
+			Exp* e = (Exp*)$1;
+			$$=v;
+			if(e->type == "BOOL" && (((BExp*)e)->trueList.size()!=0 || ((BExp*)e)->falseList.size()!=0) ){	
+				e->changeReg(freshVar());
+				pair<string,string> pq(e->type,e->reg);
+				v->push_back(pq);
+				string reg1 = freshVar(), reg2 = freshVar();
+				BExp* b = (BExp*)e;
+				string trueLabel = CodeBuffer::instance().genLabel();
+				CodeBuffer::instance().emit(reg1+" = add i1 0, 1");
+				int loc = CodeBuffer::instance().emit("br label @");
+				string falseLabel = CodeBuffer::instance().genLabel();
+				CodeBuffer::instance().emit(reg2+" = add i1 0, 0");
+				string endLabel = CodeBuffer::instance().genLabel();
+				pair<int,BranchLabelIndex> p(loc,FIRST);
+				CodeBuffer::instance().bpatch(CodeBuffer::makelist(p),endLabel);
+				CodeBuffer::instance().bpatch(b->trueList,trueLabel);
+				CodeBuffer::instance().bpatch(b->falseList,falseLabel);
+				CodeBuffer::instance().emit(b->reg+" = phi i1 [ "+reg1+", %"+trueLabel+" ], [ "+ reg2+", %"+falseLabel+" ]");
+			}
+			else{
+				pair<string,string> p(e->type,e->reg);
+				v->push_back(p);
+			}
+			delete (Exp*)$1; }
+			| Exp {
+			Exp* e = (Exp*)$1;
+			if(e->type == "BOOL" && (((BExp*)e)->trueList.size()!=0 || ((BExp*)e)->falseList.size()!=0) ){
+				string reg1 = freshVar(), reg2 = freshVar(), reg = freshVar();
+				BExp* b = (BExp*)e;
+				string trueLabel = CodeBuffer::instance().genLabel();
+				CodeBuffer::instance().emit(reg1+" = add i1 0, 1");
+				int loc = CodeBuffer::instance().emit("br label @");
+				string falseLabel = CodeBuffer::instance().genLabel();
+				CodeBuffer::instance().emit(reg2+" = add i1 0, 0");
+				string endLabel = CodeBuffer::instance().genLabel();
+				pair<int,BranchLabelIndex> p(loc,FIRST);
+				CodeBuffer::instance().bpatch(CodeBuffer::makelist(p),endLabel);
+				CodeBuffer::instance().bpatch(b->trueList,trueLabel);
+				CodeBuffer::instance().bpatch(b->falseList,falseLabel);
+				CodeBuffer::instance().emit(reg+" = phi i1 [ "+reg1+", %"+trueLabel+" ], [ "+ reg2+", %"+falseLabel+" ]");
+				b->changeReg(reg);
+			} }
+			COMMA ExpList{ vector<pair<string,string>>* v = (vector<pair<string,string>>*)$4;
+								Exp* e = (Exp*)$1;
+								pair<string,string> p(e->type,e->reg);	
+								v->insert(v->begin(),p);
+								delete (Exp*)$1; $$=v;};
+
+Type:		INT{ string* t = new string("INT"); $$=t;} | BYTE{ string* t = new string("BYTE"); $$=t;} | BOOL{ string* t = new string("BOOL"); $$=t;};
+
+BExp: Exp { if ((((Exp*)$1)->type) != "BOOL") TypeError();
+			BExp* b =(BExp*)$1;
+			if(b->trueList.size()==0&&b->falseList.size()==0){
+				int loc = CodeBuffer::instance().emit("br i1 "+b->reg+", label @, label @");
+				pair<int,BranchLabelIndex> p1(loc,FIRST);
+				pair<int,BranchLabelIndex> p2(loc,SECOND);
+				b->trueList.insert(b->trueList.begin(), p1);
+				b->falseList.insert(b->falseList.begin(), p2);
+			}
+			$$ = $1;}
+
+Exp:	LPAREN Exp RPAREN{ $$=$2;}
+		| Exp PLUS Exp
+		{ string s1 = (((Exp*)$1)->type), s3 = (((Exp*)$3)->type); 
+		string s;
+		if(s1=="BYTE" && s3=="BYTE"){
+			s ="BYTE";
+		} else if( (s1=="BYTE" || s1=="INT") && (s3=="BYTE" || s3=="INT") ){
+			s="INT";
+		} else{
+		TypeError();
+		}  
+		Exp* t = new Exp("",s);
+		Exp* e1 = (Exp*)$1; Exp* e3 = (Exp*)$3;
+		string tmpReg1 = e1->reg, tmpReg2 = e3->reg;
+		if(e1->type == "BYTE")
+		{
+			tmpReg1 = freshVar();
+			CodeBuffer::instance().emit(tmpReg1+" = zext i8 "+ e1->reg+" to i32");
+		}
+		if(e3->type == "BYTE")
+		{
+			tmpReg2 = freshVar();
+			CodeBuffer::instance().emit(tmpReg2+" = zext i8 "+ e3->reg+" to i32");
+		}
+		CodeBuffer::instance().emit(t->reg+ " = add i32 "+ tmpReg1 +", " + tmpReg2);
+		$$=t;
+		delete (Exp*)$1;
+		delete (Exp*)$3;
+		if(s=="BYTE") {
+			string tmp = freshVar();
+			CodeBuffer::instance().emit(tmp+" = trunc i32 "+t->reg+" to i8");
+			t->changeReg(tmp);		
+		}
+		}
+		| Exp MINUS Exp
+		{ string s1 = (((Exp*)$1)->type), s3 = (((Exp*)$3)->type); 
+		string s;
+		if(s1=="BYTE" && s3=="BYTE"){
+			s ="BYTE";
+		} else if( (s1=="BYTE" || s1=="INT") && (s3=="BYTE" || s3=="INT") ){
+			s="INT";
+		} else{ 
+		TypeError();
+		}  
+		Exp* t = new Exp("",s);
+		Exp* e1 = (Exp*)$1; Exp* e3 = (Exp*)$3;
+		string tmpReg1 = e1->reg, tmpReg2 = e3->reg;
+		if(e1->type == "BYTE")
+		{
+			tmpReg1 = freshVar();
+			CodeBuffer::instance().emit(tmpReg1+" = zext i8 "+ e1->reg+" to i32");
+		}
+		if(e3->type == "BYTE")
+		{
+			tmpReg2 = freshVar();
+			CodeBuffer::instance().emit(tmpReg2+" = zext i8 "+ e3->reg+" to i32");
+		}
+		CodeBuffer::instance().emit(t->reg+ " = sub i32 "+ tmpReg1 +", " + tmpReg2);
+		if(s=="BYTE") {
+			string tmp = freshVar();
+			CodeBuffer::instance().emit(tmp+" = trunc i32 "+t->reg+" to i8");
+			t->changeReg(tmp);
+		}
+		$$=t;
+		delete (Exp*)$1;
+		delete (Exp*)$3;
+		}
+		| Exp MULT Exp
+		{ string s1 = (((Exp*)$1)->type), s3 = (((Exp*)$3)->type); 
+		string s ;
+		if(s1=="BYTE" && s3=="BYTE"){
+			s ="BYTE";
+		} else if( (s1=="BYTE" || s1=="INT") && (s3=="BYTE" || s3=="INT") ){
+			s="INT";
+		} else{ 
+		TypeError();
+		}  
+		Exp* t = new Exp("",s);
+		Exp* e1 = (Exp*)$1; Exp* e3 = (Exp*)$3;
+		string tmpReg1 = e1->reg, tmpReg2 = e3->reg;
+		if(e1->type == "BYTE")
+		{
+			tmpReg1 = freshVar();
+			CodeBuffer::instance().emit(tmpReg1+" = zext i8 "+ e1->reg+" to i32");
+		}
+		if(e3->type == "BYTE")
+		{
+			tmpReg2 = freshVar();
+			CodeBuffer::instance().emit(tmpReg2+" = zext i8 "+ e3->reg+" to i32");
+		}
+		CodeBuffer::instance().emit(t->reg+ " = mul i32 "+ tmpReg1 +", " + tmpReg2);
+		if(s=="BYTE") {
+			string tmp = freshVar();
+			CodeBuffer::instance().emit(tmp+" = trunc i32 "+t->reg+" to i8");
+			t->changeReg(tmp);
+		}
+		$$=t;
+		delete (Exp*)$1;
+		delete (Exp*)$3;
+		}
+		| Exp DIV Exp
+		{ string s1 = (((Exp*)$1)->type), s3 = (((Exp*)$3)->type); 
+		Exp* e3 = (Exp*)$3; Exp* e1 = (Exp*)$1;
+		string s ;
+		if(s1=="BYTE" && s3=="BYTE"){
+			s ="BYTE";
+		} else if( (s1=="BYTE" || s1=="INT") && (s3=="BYTE" || s3=="INT") ){
+			s="INT";
+		} else{ 
+		TypeError();
+		}
+		string checkReg = freshVar();
+		CodeBuffer::instance().emit(checkReg+" = icmp eq "+ c2llvm_type(e3->type) +" 0, "+ e3->reg);
+		int location = CodeBuffer::instance().emit("br i1 "+ checkReg+", label @, label @");
+		string checklabel1 = CodeBuffer::instance().genLabel();
+		string reg001 = freshVar();
+		CodeBuffer::instance().emit(reg001 + " = getelementptr [23 x i8], [23 x i8]* @Zero_Error, i32 0, i32 0");
+		CodeBuffer::instance().emit("call void @print(i8* " + reg001 + ")");
+		CodeBuffer::instance().emit("call void @exit(i32 0)");
+		string checklabel2 = CodeBuffer::instance().genLabel();
+		pair<int,BranchLabelIndex> p1(location,FIRST), p2(location,SECOND);
+		CodeBuffer::instance().bpatch(CodeBuffer::makelist(p1),checklabel1);
+		CodeBuffer::instance().bpatch(CodeBuffer::makelist(p2),checklabel2);
+		Exp* t = new Exp("",s);
+		string tmpReg1 = e1->reg, tmpReg2 = e3->reg;
+		if(e1->type == "BYTE")
+		{
+			tmpReg1 = freshVar();
+			CodeBuffer::instance().emit(tmpReg1+" = zext i8 "+ e1->reg+" to i32");
+		}
+		if(e3->type == "BYTE")
+		{
+			tmpReg2 = freshVar();
+			CodeBuffer::instance().emit(tmpReg2+" = zext i8 "+ e3->reg+" to i32");
+		}
+		if(s=="BYTE")
+		{
+			CodeBuffer::instance().emit(t->reg+ " = udiv i32 "+ tmpReg1 +", " + tmpReg2);
+			string reg01 = freshVar(), reg02 = freshVar();
+			CodeBuffer::instance().emit(reg01+" = trunc i32 "+t->reg+" to i8");
+			t->changeReg(reg01);			
+		}
+		else{
+			CodeBuffer::instance().emit(t->reg+ " = sdiv i32 "+ tmpReg1 +", " + tmpReg2);
+		}
+		
+		$$=t;
+		delete (Exp*)$1;
+		delete (Exp*)$3;
+		}
+		| ID{ string reg = loadVar(*(string*)$1);
+			  string type = getVarType(*(string*)$1);
+			  if(type!="BOOL"){
+				Exp* t = new Exp("",type);
+				t->changeReg(reg);
+				$$=t;
+			  } else {
+					BExp* t = new BExp("","BOOL");
+					t->changeReg(reg);
+					$$=t;
+				}
+			  delete (string*)$1;
+			}
+		| Call{ 
+					Exp* e = (Exp*)$1;
+					if(e->type == "BOOL")
+					{
+						BExp* b = (BExp*)e;
+						int loc = CodeBuffer::instance().emit("br i1 "+b->reg+", label @, label @");
+						pair<int,BranchLabelIndex> p1(loc,FIRST);
+						pair<int,BranchLabelIndex> p2(loc,SECOND);
+						b->trueList.insert(b->trueList.begin(), p1);
+						b->falseList.insert(b->falseList.begin(), p2);
+					}
+					$$ = $1 ;}
+		| NUM{ 
+				Exp* t = new Exp("","INT");
+				CodeBuffer::instance().emit(t->reg+" = add i32 0,"+(*(string*)$1));
+				$$= t; delete (string*)$1;}
+		| NUM B{ checkByte(*(string*)$1);
+				Exp* t = new Exp("","BYTE");
+				CodeBuffer::instance().emit(t->reg+" = add i8 0,"+(*(string*)$1));
+				$$= t; delete (string*)$1;}
+		| STRING
+				{ 
+					string* s = (string*)$1;
+					(*s)[s->size()-1] = '\00';
+					string name = freshVar(1);
+					Exp* e = new Exp(name,"STRING");
+					CodeBuffer::instance().emitGlobal(name+"= constant ["+to_string(s->length()-1)+" x i8] c"+*s+"\"");
+					CodeBuffer::instance().emit(e->reg + "= getelementptr [" + to_string(s->size()-1) + " x i8], [" + to_string(s->size()-1) + " x i8]* " + name + ", i8 0, i8 0");
+					$$ = e;
+					delete (string*)$1;
+				}
+		| TRUE{ BExp* b = new BExp("","BOOL");
+				int loc = CodeBuffer::instance().emit("br label @");
+				pair<int,BranchLabelIndex> p(loc,FIRST);
+				b->trueList.insert(b->trueList.begin(),p);
+				$$=b;}
+		| FALSE{ BExp* b = new BExp("","BOOL");
+				int loc = CodeBuffer::instance().emit("br label @");
+				pair<int,BranchLabelIndex> p(loc,FIRST);
+				b->falseList.insert(b->falseList.begin(),p);
+				$$=b;}
+		| NOT Exp
+		{ 
+		string s = ((Exp*)$2)->type;
+		if(s!="BOOL"){ delete (Exp*)$2; TypeError(); }
+		BExp* b = (BExp*)$2;
+		vector<pair<int,BranchLabelIndex>> tmp(b->falseList);
+		b->falseList = b->trueList;
+		b->trueList = tmp;
+		if(b->trueList.size()==0 && b->falseList.size()==0)
+		{
+			int loc = CodeBuffer::instance().emit("br i1 "+b->reg+", label @, label @");
+			pair<int,BranchLabelIndex> p1(loc,FIRST);
+			pair<int,BranchLabelIndex> p2(loc,SECOND);
+			b->trueList.insert(b->trueList.begin(), p2);
+			b->falseList.insert(b->falseList.begin(), p1);
+		}
+		$$=b;
+		}
+		| Exp AND
+				{	if(((Exp*)$1)->type != "BOOL") TypeError();
+					BExp* b = (BExp*)$1;
+					if(b->trueList.size()==0&&b->falseList.size()==0){
+						int loc = CodeBuffer::instance().emit("br i1 "+b->reg+", label @, label @");
+						pair<int,BranchLabelIndex> p1(loc,FIRST);
+						pair<int,BranchLabelIndex> p2(loc,SECOND);
+						b->trueList.insert(b->trueList.begin(), p1);
+						b->falseList.insert(b->falseList.begin(), p2);
+					}
+				}
+					 M Exp
+		{
+			string s1 = ((Exp*)$1)->type, s3 = ((Exp*)$5)->type;
+			if(s1!= "BOOL" || s3!= "BOOL") { delete (Exp*)$1; delete (Exp*)$5; delete (string*)$4; TypeError();}
+			BExp* b1 = (BExp*)$1, *b2 = (BExp*)$5;
+			BExp* b = new BExp("","BOOL");
+			if(b2->trueList.size()==0&&b2->falseList.size()==0){
+				int loc = CodeBuffer::instance().emit("br i1 "+b2->reg+", label @, label @");
+				pair<int,BranchLabelIndex> p1(loc,FIRST);
+				pair<int,BranchLabelIndex> p2(loc,SECOND);
+				b2->trueList.insert(b2->trueList.begin(), p1);
+				b2->falseList.insert(b2->falseList.begin(), p2);
+			}
+			CodeBuffer::instance().bpatch(b1->trueList,*(string*)$4);
+			b-> falseList = CodeBuffer::merge(b1->falseList,b2->falseList);
+			b->trueList = b2->trueList;
+			delete (BExp*)$1; delete (BExp*)$5; delete (string*)$4;
+			$$ =b;
+		}
+		| Exp OR
+				{	if(((Exp*)$1)->type != "BOOL") TypeError();
+					BExp* b = (BExp*)$1;
+					if(b->trueList.size()==0&&b->falseList.size()==0){
+						int loc = CodeBuffer::instance().emit("br i1 "+b->reg+", label @, label @");
+						pair<int,BranchLabelIndex> p1(loc,FIRST);
+						pair<int,BranchLabelIndex> p2(loc,SECOND);
+						b->trueList.insert(b->trueList.begin(), p1);
+						b->falseList.insert(b->falseList.begin(), p2);
+					}
+				}
+					 M Exp
+		{
+			string s1 = ((Exp*)$1)->type, s3 = ((Exp*)$5)->type;
+			if(s1!= "BOOL" || s3!= "BOOL") { delete (Exp*)$1; delete (Exp*)$5; delete (string*)$4; TypeError();}
+			BExp* b1 = (BExp*)$1, *b2 = (BExp*)$5;
+			BExp* b = new BExp("","BOOL");
+			if(b2->trueList.size()==0&&b2->falseList.size()==0){
+				int loc = CodeBuffer::instance().emit("br i1 "+b2->reg+", label @, label @");
+				pair<int,BranchLabelIndex> p1(loc,FIRST);
+				pair<int,BranchLabelIndex> p2(loc,SECOND);
+				b2->trueList.insert(b2->trueList.begin(), p1);
+				b2->falseList.insert(b2->falseList.begin(), p2);
+			}
+			CodeBuffer::instance().bpatch(b1->falseList,*(string*)$4);
+			b-> trueList = CodeBuffer::merge(b1->trueList,b2->trueList);
+			b->falseList = b2->falseList;
+			delete (BExp*)$1; delete (BExp*)$5; delete (string*)$4;		
+			$$ = b;
+		}
+		| Exp RELOP Exp
+		{ 
+			if(!checkRelOp(((Exp*)$3)->type,((Exp*)$1)->type)){
+			delete (string*)$2; delete (Exp*)$1; delete (Exp*)$3; TypeError();
+			}
+			string s = *((string*)$2);
+			Exp* e1 = (Exp*)$1, *e2 = (Exp*)$3;
+			string tmpReg1 = e1->reg, tmpReg2 = e2->reg;
+			string t = "i32";
+			string uORs = "s";
+			if(e1->type == "BYTE" && e2->type == "INT")
+			{
+				tmpReg1 = freshVar();
+				CodeBuffer::instance().emit(tmpReg1+" = zext i8 "+ e1->reg+" to i32");
+			}
+			if(e2->type == "BYTE" && e1->type == "INT")
+			{
+				tmpReg2 = freshVar();
+				CodeBuffer::instance().emit(tmpReg2+" = zext i8 "+ e2->reg+" to i32");
+			}
+			if(e2->type == "BYTE" && e1->type == "BYTE") {t = "i8"; uORs = "u";}
+			string reg = freshVar();
+			if(s == ">"){
+				CodeBuffer::instance().emit(reg+" = icmp "+ uORs +"gt "+ t +" "+ tmpReg1 +", "+ tmpReg2);
+			} else if (s == "<"){
+				CodeBuffer::instance().emit(reg+" = icmp "+ uORs +"lt "+ t +" "+ tmpReg1 +", "+ tmpReg2);
+			} else if (s == "<="){
+				CodeBuffer::instance().emit(reg+" = icmp "+ uORs +"le "+ t +" "+ tmpReg1 +", "+ tmpReg2);
+			} else {
+				CodeBuffer::instance().emit(reg+" = icmp "+ uORs +"ge "+ t +" "+ tmpReg1 +", "+ tmpReg2);
+			}
+			int loc = CodeBuffer::instance().emit("br i1 "+reg+", label @, label @");
+			BExp* b = new BExp("","BOOL");
+			pair<int,BranchLabelIndex> p1(loc,FIRST) , p2(loc,SECOND);
+			b->falseList.insert(b->falseList.begin(),p2);
+			b->trueList.insert(b->trueList.begin(),p1);
+			delete (string*)$2; delete (Exp*)$1; delete (Exp*)$3;
+			$$=b;
+		}
+		| Exp RELOPII Exp
+		{ 
+			if(!checkRelOp(((Exp*)$3)->type,((Exp*)$1)->type)){
+			delete (string*)$2; delete (Exp*)$1; delete (Exp*)$3; TypeError();
+			}
+			string s = *((string*)$2);
+			Exp* e1 = (Exp*)$1, *e2 = (Exp*)$3;
+			string tmpReg1 = e1->reg, tmpReg2 = e2->reg;
+			string t = "i32";
+			if(e1->type == "BYTE" && e2->type == "INT")
+			{
+				tmpReg1 = freshVar();
+				CodeBuffer::instance().emit(tmpReg1+" = zext i8 "+ e1->reg+" to i32");
+			}
+			if(e2->type == "BYTE" && e1->type == "INT")
+			{
+				tmpReg2 = freshVar();
+				CodeBuffer::instance().emit(tmpReg2+" = zext i8 "+ e2->reg+" to i32");
+			}
+			if(e2->type == "BYTE" && e1->type == "BYTE") t = "i8";
+			string reg = freshVar();
+			if(s == "=="){
+				CodeBuffer::instance().emit(reg+" = icmp eq "+ t +" "+ tmpReg1 +", "+ tmpReg2);
+			} else {
+				CodeBuffer::instance().emit(reg+" = icmp ne "+ t +" "+ tmpReg1 +", "+ tmpReg2);
+			}
+			int loc = CodeBuffer::instance().emit("br i1 "+reg+", label @, label @");
+			BExp* b = new BExp("","BOOL");
+			pair<int,BranchLabelIndex> p1(loc,FIRST) , p2(loc,SECOND);
+			b->falseList.insert(b->falseList.begin(),p2);
+			b->trueList.insert(b->trueList.begin(),p1);
+			delete (string*)$2; delete (Exp*)$1; delete (Exp*)$3;
+			$$=b;
+		};
+		
+		M : { string s = CodeBuffer::instance().genLabel(); $$ = new string(s); }
+		N : { int loc = CodeBuffer::instance().emit("br label @"); $$ = new int(loc); }
+
+%%
+
+int main()
+{
+	return yyparse();
+}
+
+void yyerror (char const *s) {
+   errorSyn(yylineno);
+   exit(1);
+ }
